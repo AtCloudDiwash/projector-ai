@@ -3,14 +3,13 @@ Gemini Live Agent relay — always-on, context-aware, tool-enabled.
 
 Streams:
   Browser → Server  binary: PCM Int16 16kHz mic audio (when mic unmuted)
-  Browser → Server  JSON:   context updates, tool responses (frame)
+  Browser → Server  JSON:   context updates | screen_frame (continuous 1fps JPEG)
   Server  → Browser binary: PCM Int16 24kHz Gemini voice
-  Server  → Browser JSON:   ready | turn_complete | tool_call | search_result | error
+  Server  → Browser JSON:   ready | turn_complete | search_result | error
 
 Tools:
-  capture_screen — Gemini calls it → frontend grabs JPEG → backend sends image to Gemini
-  web_search     — Gemini calls it → backend executes Gemini grounded search → returns summary+sources
-                   to both Gemini (LiveClientToolResponse) and browser (search_result JSON)
+  web_search — Gemini calls it → backend executes Gemini grounded search → returns summary+sources
+               to both Gemini (LiveClientToolResponse) and browser (search_result JSON)
 """
 
 import os
@@ -25,25 +24,12 @@ from google.genai import types
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-LIVE_MODEL     = "gemini-2.5-flash-native-audio-latest"
+LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 TOOLS = [
     {
         "function_declarations": [
-            {
-                "name": "capture_screen",
-                "description": (
-                    "Capture the user's current screen as an image to see what they are looking at. "
-                    "Call this when the user asks about what's on their screen, what image is displayed, "
-                    "what they see, or any visual question about the current content on screen."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                },
-            },
             {
                 "name": "web_search",
                 "description": (
@@ -66,6 +52,8 @@ TOOLS = [
     }
 ]
 
+# ── Tools execution──────────────────────────────────────────────────────────
+
 
 async def execute_web_search(client: genai.Client, query: str) -> dict:
     """
@@ -76,8 +64,10 @@ async def execute_web_search(client: genai.Client, query: str) -> dict:
         response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=(
-                f"Search the web and give a concise, factual summary about: {query}. "
-                "Include specific facts, figures, and current information where available."
+                f"Search the web for reliable information about '{query}'. "
+                "Return a concise factual summary (5-7 bullet points). "
+                "Include key facts, numbers, dates, and recent developments. "
+                "Avoid speculation and opinions."
             ),
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -98,10 +88,12 @@ async def execute_web_search(client: genai.Client, query: str) -> dict:
                         url = web.uri
                         if url not in seen:
                             seen.add(url)
-                            sources.append({
-                                "title": getattr(web, "title", None) or url,
-                                "url":   url,
-                            })
+                            sources.append(
+                                {
+                                    "title": getattr(web, "title", None) or url,
+                                    "url": url,
+                                }
+                            )
                         if len(sources) >= 5:
                             break
 
@@ -110,6 +102,9 @@ async def execute_web_search(client: genai.Client, query: str) -> dict:
     except Exception as exc:
         logger.error(f"execute_web_search error: {exc}")
         return {"summary": f"Search failed: {exc}", "sources": []}
+
+
+# ── Context builder ──────────────────────────────────────────────────────────
 
 
 def _build_context(session: dict | None) -> str:
@@ -131,6 +126,9 @@ def _build_context(session: dict | None) -> str:
     return "\n".join(parts)
 
 
+# ── Gemini Live Agent's task: Each time the function is called gemini agent executes the tasks defined in this function  ──────────────────────────────────────────────────────────
+
+
 async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
     context = _build_context(session)
 
@@ -146,19 +144,17 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             "- CRITICAL: Do NOT speak at session start. Do NOT greet. Do NOT introduce yourself. Stay completely silent until the user speaks to you via voice.\n"
             "- CRITICAL: When you receive a [SCENE UPDATE] message, process it silently. Do NOT respond. Do NOT confirm. Do NOT speak at all.\n"
             "- Only speak when the user directly asks you a voice question.\n"
-            "- Answer voice questions concisely (2-4 sentences max).\n"
-            "- Stay grounded in the document — do not invent facts.\n"
+            "- If the user says anything like 'stop', 'enough', 'ok thanks', 'that's all', 'quiet', or any signal they want silence — stop speaking immediately and go completely silent. Do not respond or acknowledge. Wait until they speak to you again.\n"
+            "- Answer voice questions concisely (2-4 sentences max). Donot over explain unless and untill you are asked to do so.\n"
+            "- Stay grounded in the document and your knowledge— do not invent facts.\n"
             "- Speak naturally, like a documentary narrator answering a viewer's question.\n"
-            "- When the user asks about what's on screen or what image they see, call capture_screen.\n"
-            "- After receiving the screen capture, describe what you see naturally and concisely.\n"
+            "- You continuously receive the user's screen as image frames. Use them to answer any question about what's on their screen naturally and concisely.\n"
             "- When the user asks about real-world facts, current events, people, places, or anything requiring web knowledge, call web_search.\n"
             "- After a web_search result is returned, summarize the key facts concisely in your voice response.\n"
             "- If asked something unrelated, gently redirect to the content."
         ),
         "speech_config": {
-            "voice_config": {
-                "prebuilt_voice_config": {"voice_name": "Charon"}
-            }
+            "voice_config": {"prebuilt_voice_config": {"voice_name": "Charon"}}
         },
     }
 
@@ -169,16 +165,18 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
 
     stop_event = asyncio.Event()
 
+    # ── Queues definition for each category ──────────────────────────────────────────────────────────────────
+
     # Mixed input queue: bytes = mic audio | str = context text | None = sentinel
     input_queue: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=100)
 
-    # Tool response queue: browser → backend tool responses (e.g. screen frame)
-    tool_response_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    # Screen frame queue: browser → backend continuous JPEG frames
+    screen_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=4)
 
     # Backend tool queue: Gemini tool calls handled entirely on the backend (e.g. web_search)
     backend_tool_queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
-    # ── Receive from browser ──────────────────────────────────────────────────
+    # ── Receive from browser: this function listens to the browser for the type of input and puts the appropriate input category to its respective queue ──────────────────────────────────────────────────
     async def recv_from_browser() -> None:
         try:
             while not stop_event.is_set():
@@ -187,8 +185,10 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                 if "bytes" in message and message["bytes"]:
                     # Mic audio — drop oldest chunk if lagging
                     if input_queue.full():
-                        try: input_queue.get_nowait()
-                        except asyncio.QueueEmpty: pass
+                        try:
+                            input_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
                     input_queue.put_nowait(message["bytes"])
 
                 elif "text" in message and message["text"]:
@@ -204,31 +204,32 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                         if text:
                             await input_queue.put(text)
 
-                    elif msg_type == "frame":
-                        # Tool response: screen capture JPEG (base64) from browser
-                        await tool_response_queue.put({
-                            "tool":    "capture_screen",
-                            "call_id": data.get("call_id", ""),
-                            "data":    data.get("data", ""),   # base64 JPEG
-                        })
-
-                    # ── Future tool response slot ─────────────────────────
-                    # elif msg_type == "search_result":
-                    #     await tool_response_queue.put({
-                    #         "tool":    "google_search",
-                    #         "call_id": data.get("call_id", ""),
-                    #         "data":    data.get("results", []),
-                    #     })
+                    elif msg_type == "screen_frame":
+                        # Continuous screen frame: decode and queue for Gemini
+                        b64 = data.get("data", "")
+                        if b64:
+                            try:
+                                jpeg_bytes = base64.b64decode(b64)
+                                # Drop oldest frame if queue is full (non-blocking)
+                                if screen_queue.full():
+                                    try:
+                                        screen_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                screen_queue.put_nowait(jpeg_bytes)
+                            except Exception as e:
+                                logger.warning(f"screen_frame decode error: {e}")
 
         except (WebSocketDisconnect, Exception) as exc:
             logger.info(f"Browser disconnected: {exc}")
         finally:
             await input_queue.put(None)
-            await tool_response_queue.put(None)
+            await screen_queue.put(None)
             await backend_tool_queue.put(None)
             stop_event.set()
 
     # ── Forward mic audio + context text to Gemini ───────────────────────────
+
     async def forward_inputs(live) -> None:
         while not stop_event.is_set():
             item = await input_queue.get()
@@ -237,77 +238,27 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             if isinstance(item, bytes):
                 await live.send(
                     input=types.LiveClientRealtimeInput(
-                        media_chunks=[types.Blob(data=item, mime_type="audio/pcm;rate=16000")]
+                        media_chunks=[
+                            types.Blob(data=item, mime_type="audio/pcm;rate=16000")
+                        ]
                     )
                 )
             elif isinstance(item, str):
                 await live.send(input=f"[SCENE UPDATE] {item}", end_of_turn=True)
 
-    # ── Handle tool responses from browser ───────────────────────────────────
-    async def handle_tool_responses(live) -> None:
-        """
-        Routes tool responses back to Gemini.
-        Extend: add elif blocks for future tools.
-        """
+    # ── Forward continuous screen frames to Gemini ────────────────────────────
+    async def forward_screen_frames(live) -> None:
         while not stop_event.is_set():
-            item = await tool_response_queue.get()
+            item = await screen_queue.get()
             if item is None:
                 break
-
-            tool    = item.get("tool", "")
-            call_id = item.get("call_id", "")
-
-            if tool == "capture_screen":
-                b64_data = item.get("data", "")
-                if b64_data:
-                    try:
-                        jpeg_bytes = base64.b64decode(b64_data)
-                        # Send image as realtime media so Gemini can see it,
-                        # then immediately close the tool call referencing it.
-                        await live.send(
-                            input=types.LiveClientRealtimeInput(
-                                media_chunks=[types.Blob(data=jpeg_bytes, mime_type="image/jpeg")]
-                            )
-                        )
-                        # Small yield so the image is flushed before the tool response
-                        await asyncio.sleep(0.05)
-                        fn_response = {
-                            "result": "success",
-                            "description": (
-                                "The user's screen has been captured and sent to you as an image "
-                                "in this same turn. Look at the image above and describe what you see."
-                            ),
-                        }
-                    except Exception as e:
-                        logger.error(f"Frame decode error: {e}")
-                        fn_response = {"result": "error", "description": "Screen capture failed to decode."}
-                else:
-                    fn_response = {
-                        "result": "unavailable",
-                        "description": "The user has not shared their screen yet. Ask them to click 'Share Screen' first.",
-                    }
-
-                await live.send(
-                    input=types.LiveClientToolResponse(
-                        function_responses=[
-                            types.FunctionResponse(
-                                id=call_id,
-                                name="capture_screen",
-                                response=fn_response,
-                            )
-                        ]
-                    )
+            await live.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[
+                        types.Blob(data=item, mime_type="image/jpeg")
+                    ]
                 )
-
-            # ── Future tool slot ──────────────────────────────────────────────
-            # elif tool == "google_search":
-            #     results = item.get("data", [])
-            #     await live.send(input=types.LiveClientToolResponse(
-            #         function_responses=[types.FunctionResponse(
-            #             id=call_id, name="google_search",
-            #             response={"results": results}
-            #         )]
-            #     ))
+            )
 
     # ── Handle backend-side tool calls (web_search executed here, not browser) ─
     async def handle_backend_tools(live) -> None:
@@ -318,19 +269,27 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
 
             if item.get("name") == "web_search":
                 call_id = item["call_id"]
-                query   = item["args"].get("query", "")
+                query = item["args"].get("query", "")
                 logger.info(f"Executing web_search: {query!r}")
+
+                # Notify browser that search is in progress
+                try:
+                    await websocket.send_json({"type": "searching", "query": query})
+                except Exception:
+                    pass
 
                 result = await execute_web_search(client, query)
 
                 # Send search result to browser for the UI overlay
                 try:
-                    await websocket.send_json({
-                        "type":    "search_result",
-                        "query":   query,
-                        "summary": result["summary"],
-                        "sources": result["sources"],
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "search_result",
+                            "query": query,
+                            "summary": result["summary"],
+                            "sources": result["sources"],
+                        }
+                    )
                 except Exception as exc:
                     logger.warning(f"Failed to send search_result to browser: {exc}")
 
@@ -370,29 +329,29 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                                 await websocket.send_bytes(part.inline_data.data)
 
                     # Turn complete
-                    if response.server_content and response.server_content.turn_complete:
+                    if (
+                        response.server_content
+                        and response.server_content.turn_complete
+                    ):
                         await websocket.send_json({"type": "turn_complete"})
 
                     # Tool calls from Gemini → dispatch by tool name
                     if response.tool_call:
                         for fn_call in response.tool_call.function_calls:
-                            if fn_call.name == "capture_screen":
-                                # Browser-side tool: ask frontend to grab a frame
-                                await websocket.send_json({
-                                    "type":    "tool_call",
-                                    "tool":    "capture_screen",
-                                    "call_id": fn_call.id,
-                                })
-                                logger.info("Gemini requested screen capture")
-
-                            elif fn_call.name == "web_search":
+                            if fn_call.name == "web_search":
                                 # Backend-side tool: handle entirely on server
-                                await backend_tool_queue.put({
-                                    "name":    "web_search",
-                                    "call_id": fn_call.id,
-                                    "args":    dict(fn_call.args) if fn_call.args else {},
-                                })
-                                logger.info(f"Gemini requested web_search: {fn_call.args}")
+                                await backend_tool_queue.put(
+                                    {
+                                        "name": "web_search",
+                                        "call_id": fn_call.id,
+                                        "args": dict(fn_call.args)
+                                        if fn_call.args
+                                        else {},
+                                    }
+                                )
+                                logger.info(
+                                    f"Gemini requested web_search: {fn_call.args}"
+                                )
 
         except Exception as exc:
             logger.error(f"Gemini receive error: {exc}")
@@ -400,6 +359,8 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             stop_event.set()
 
     try:
+        # Gemini live client
+
         async with client.aio.live.connect(model=LIVE_MODEL, config=config) as live:
             logger.info(f"Gemini Live session opened (model={LIVE_MODEL})")
             await websocket.send_json({"type": "ready"})
@@ -407,7 +368,7 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             await asyncio.gather(
                 recv_from_browser(),
                 forward_inputs(live),
-                handle_tool_responses(live),
+                forward_screen_frames(live),
                 handle_backend_tools(live),
                 forward_from_gemini(live),
                 return_exceptions=True,

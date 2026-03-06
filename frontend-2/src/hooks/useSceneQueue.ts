@@ -29,8 +29,10 @@ export function useSceneQueue(): UseSceneQueueReturn {
   const [isStreamComplete, setIsStreamComplete] = useState(false);
 
   const popScene = useCallback((): Scene | null => {
-    const scene = queueRef.current.shift() ?? null;
-    if (scene) setQueueSize(queueRef.current.length);
+    if (queueRef.current.length === 0) return null;
+    queueRef.current.sort((a, b) => a.scene_num - b.scene_num);
+    const scene = queueRef.current.shift()!;
+    setQueueSize(queueRef.current.length);
     return scene;
   }, []);
 

@@ -55,6 +55,12 @@ export const UploadScreen: React.FC<Props> = ({ onSessionStart, onError }) => {
       {/* Radial glow background */}
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,#111_0%,#000_100%)]" />
 
+      {/* Top-left navbar */}
+      <div className="absolute top-5 left-5 z-20 flex items-center gap-2">
+        <img src="/logo.svg" alt="Projector.AI" className="h-7 w-auto" />
+        <span className="text-sm font-medium tracking-[0.12em] text-white/80 uppercase">Projector.AI</span>
+      </div>
+
       <div className="relative z-10 w-full max-w-[560px] px-6 flex flex-col gap-6">
         {/* Logo */}
         <div className="text-center">
