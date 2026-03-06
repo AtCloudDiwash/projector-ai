@@ -1,18 +1,19 @@
 """
-Gemini Live Agent relay for The Cinematic Narrator.
+Gemini Live Agent relay — always-on, context-aware.
 
-Bridges browser WebSocket ↔ Gemini Live API using live.start_stream().
-  Browser mic (PCM Int16 16kHz) → WebSocket → Gemini Live
-  Gemini Live (PCM Int16 24kHz) → WebSocket → Browser speaker
+One session per player screen load. Mic mute/unmute via Space key.
+Scene context is pushed automatically whenever the scene changes.
 
-JSON control messages:
-  Browser → Server:  {"type": "end"}           — stop session cleanly
-  Server → Browser:  {"type": "ready"}         — Live session established
-                     {"type": "turn_complete"}  — Gemini finished speaking
-                     {"type": "error", "message": "..."}
-Binary frames:
-  Browser → Server:  raw PCM Int16 bytes (16kHz mono)
-  Server → Browser:  raw PCM Int16 bytes (24kHz mono)
+Binary frames:  Browser → Server  raw PCM Int16 16kHz (only when mic unmuted)
+                Server → Browser  raw PCM Int16 24kHz (Gemini voice response)
+JSON frames:
+  Browser → Server:
+    {"type": "end"}                    — disconnect cleanly
+    {"type": "context", "text": "..."} — current scene update (no audio reply expected)
+  Server → Browser:
+    {"type": "ready"}                  — session established
+    {"type": "turn_complete"}          — Gemini finished speaking
+    {"type": "error", "message": "..."}
 """
 
 import os
@@ -21,12 +22,12 @@ import asyncio
 import logging
 from fastapi import WebSocket, WebSocketDisconnect
 from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LIVE_MODEL     = "gemini-2.5-flash-native-audio-latest"
-MIC_MIME_TYPE  = "audio/pcm;rate=16000"
 
 
 def _build_context(session: dict | None) -> str:
@@ -38,7 +39,7 @@ def _build_context(session: dict | None) -> str:
     ]
     scenes: list[dict] = session.get("scenes", [])
     if scenes:
-        parts.append("\nScene summaries from the cinematic presentation:")
+        parts.append("\nAll scenes in the presentation:")
         for s in scenes:
             parts.append(f"\nScene {s.get('scene_num', '?')}: {s.get('title', '')}")
             if s.get("narration"):
@@ -54,13 +55,16 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
     config = {
         "response_modalities": ["AUDIO"],
         "system_instruction": (
-            f"You are an intelligent narrator assistant for a live cinematic documentary experience.\n\n"
-            f"The user is watching a presentation based on this content:\n{context}\n\n"
-            f"Rules:\n"
-            f"- Answer voice questions concisely (2-4 sentences max).\n"
-            f"- Stay grounded in the document content — do not invent facts.\n"
-            f"- Speak naturally, like a documentary narrator answering a viewer's question.\n"
-            f"- If asked something unrelated to the document, gently redirect to the content."
+            "You are an intelligent narrator assistant monitoring a live cinematic documentary experience.\n\n"
+            "You run continuously in the background. The user will occasionally press Space to speak to you.\n"
+            "You will receive scene context updates automatically as scenes change — use them to stay aware.\n\n"
+            f"Document content:\n{context}\n\n"
+            "Rules:\n"
+            "- Answer voice questions concisely (2-4 sentences max).\n"
+            "- Stay grounded in the document — do not invent facts.\n"
+            "- Speak naturally, like a documentary narrator answering a viewer's question.\n"
+            "- When you receive a [SCENE UPDATE] message, silently acknowledge it — do NOT speak unless asked.\n"
+            "- If asked something unrelated, gently redirect to the content."
         ),
         "speech_config": {
             "voice_config": {
@@ -75,84 +79,83 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
     )
 
     stop_event  = asyncio.Event()
-    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=50)
+    # Mixed queue: bytes = audio chunk, str = context update, None = sentinel
+    input_queue: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=100)
 
     async def recv_from_browser() -> None:
-        """Read WebSocket frames → queue mic audio chunks."""
         try:
             while not stop_event.is_set():
                 message = await websocket.receive()
                 if "bytes" in message and message["bytes"]:
-                    try:
-                        audio_queue.put_nowait(message["bytes"])
-                    except asyncio.QueueFull:
-                        # Drop oldest to prevent lag build-up
-                        try:
-                            audio_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
-                        audio_queue.put_nowait(message["bytes"])
+                    # Mic audio — drop oldest if lagging
+                    if input_queue.full():
+                        try: input_queue.get_nowait()
+                        except asyncio.QueueEmpty: pass
+                    input_queue.put_nowait(message["bytes"])
                 elif "text" in message and message["text"]:
                     data = json.loads(message["text"])
                     if data.get("type") == "end":
                         break
+                    elif data.get("type") == "context":
+                        text = data.get("text", "").strip()
+                        if text:
+                            await input_queue.put(text)
         except (WebSocketDisconnect, Exception) as exc:
             logger.info(f"Browser disconnected: {exc}")
         finally:
-            await audio_queue.put(None)  # sentinel to end mic_stream
+            await input_queue.put(None)
             stop_event.set()
 
-    async def mic_stream():
-        """Async generator that feeds queued PCM chunks to start_stream."""
+    async def forward_inputs(live) -> None:
+        """Route audio chunks and context text to Gemini."""
         while not stop_event.is_set():
-            chunk = await audio_queue.get()
-            if chunk is None:
-                return
-            yield chunk
+            item = await input_queue.get()
+            if item is None:
+                break
+            if isinstance(item, bytes):
+                # Real-time mic audio
+                await live.send(
+                    input=types.LiveClientRealtimeInput(
+                        media_chunks=[types.Blob(data=item, mime_type="audio/pcm;rate=16000")]
+                    )
+                )
+            elif isinstance(item, str):
+                # Scene context update — end_of_turn=True so Gemini commits it.
+                # System instruction tells Gemini not to speak in response to these.
+                await live.send(input=f"[SCENE UPDATE] {item}", end_of_turn=True)
+
+    async def forward_from_gemini(live) -> None:
+        """Multi-turn receive loop — persistent across user turns."""
+        try:
+            while not stop_event.is_set():
+                turn = live.receive()
+                async for response in turn:
+                    if stop_event.is_set():
+                        return
+                    if response.server_content and response.server_content.model_turn:
+                        for part in response.server_content.model_turn.parts:
+                            if (
+                                part.inline_data
+                                and isinstance(part.inline_data.data, bytes)
+                                and part.inline_data.data
+                            ):
+                                await websocket.send_bytes(part.inline_data.data)
+                    if response.server_content and response.server_content.turn_complete:
+                        await websocket.send_json({"type": "turn_complete"})
+        except Exception as exc:
+            logger.error(f"Gemini receive error: {exc}")
+        finally:
+            stop_event.set()
 
     try:
         async with client.aio.live.connect(model=LIVE_MODEL, config=config) as live:
             logger.info(f"Gemini Live session opened (model={LIVE_MODEL})")
             await websocket.send_json({"type": "ready"})
 
-            async def run_stream() -> None:
-                """
-                Pipe mic audio → Gemini via start_stream() and relay responses
-                back to the browser as binary PCM frames.
-                """
-                try:
-                    async for response in live.start_stream(
-                        stream=mic_stream(),
-                        mime_type=MIC_MIME_TYPE,
-                    ):
-                        if stop_event.is_set():
-                            break
-
-                        # PCM audio from Gemini → browser
-                        if response.server_content and response.server_content.model_turn:
-                            for part in response.server_content.model_turn.parts:
-                                if (
-                                    part.inline_data
-                                    and isinstance(part.inline_data.data, bytes)
-                                    and part.inline_data.data
-                                ):
-                                    await websocket.send_bytes(part.inline_data.data)
-
-                        # Turn complete
-                        if (
-                            response.server_content
-                            and response.server_content.turn_complete
-                        ):
-                            await websocket.send_json({"type": "turn_complete"})
-
-                except Exception as exc:
-                    logger.error(f"Stream error: {exc}")
-                finally:
-                    stop_event.set()
-
             await asyncio.gather(
                 recv_from_browser(),
-                run_stream(),
+                forward_inputs(live),
+                forward_from_gemini(live),
                 return_exceptions=True,
             )
 
