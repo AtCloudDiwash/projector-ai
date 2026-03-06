@@ -108,8 +108,7 @@ export const PlayerScreen: React.FC<Props> = ({
 
   useEffect(() => {
     if (queueSize > 0) tryPlayNext();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queueSize]);
+  }, [queueSize, audio.audioUnlocked, tryPlayNext]);
 
   const handleUnlock = useCallback(() => {
     audio.unlock();
@@ -238,6 +237,16 @@ export const PlayerScreen: React.FC<Props> = ({
         <GeminiWave isActive={live.isMicActive || live.mode === 'speaking'} mode={live.mode} />
 
         <Controls onBack={handleBack} onReplayAudio={audio.replayCurrent} />
+
+        {live.isSearching && (
+          <div className="absolute top-[10vh] left-1/2 -translate-x-1/2 z-30
+                          flex items-center gap-2 px-4 py-1.5 rounded-full
+                          bg-zinc-900/90 border border-sky-500/30 text-sky-300 text-[11px]
+                          tracking-[0.12em] uppercase pointer-events-none">
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping shrink-0" />
+            Searching the web...
+          </div>
+        )}
 
         {live.searchResult && (
           <SearchOverlay result={live.searchResult} onClose={live.clearSearchResult} />

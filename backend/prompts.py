@@ -11,7 +11,9 @@ USER PROMPT: {user_prompt}
 CONTENT TO NARRATE:
 {content}
 
-Your task: Break this content into exactly {num_scenes} cinematic scenes for a multimedia narrative experience.
+Your task: Break this content into the most appropriate number of cinematic scenes for a multimedia narrative experience.
+Use your judgment: short or simple content warrants 3-5 scenes, medium content 5-8 scenes, rich or complex content up to 12 scenes.
+Never pad scenes just to fill a quota — every scene must carry distinct meaning.
 
 Respond ONLY with a JSON array. No markdown, no explanation — pure JSON.
 

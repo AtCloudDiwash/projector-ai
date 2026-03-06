@@ -146,6 +146,7 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             "- CRITICAL: Do NOT speak at session start. Do NOT greet. Do NOT introduce yourself. Stay completely silent until the user speaks to you via voice.\n"
             "- CRITICAL: When you receive a [SCENE UPDATE] message, process it silently. Do NOT respond. Do NOT confirm. Do NOT speak at all.\n"
             "- Only speak when the user directly asks you a voice question.\n"
+            "- If the user says anything like 'stop', 'enough', 'ok thanks', 'that's all', 'quiet', or any signal they want silence — stop speaking immediately and go completely silent. Do not respond or acknowledge. Wait until they speak to you again.\n"
             "- Answer voice questions concisely (2-4 sentences max).\n"
             "- Stay grounded in the document — do not invent facts.\n"
             "- Speak naturally, like a documentary narrator answering a viewer's question.\n"
@@ -320,6 +321,12 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                 call_id = item["call_id"]
                 query   = item["args"].get("query", "")
                 logger.info(f"Executing web_search: {query!r}")
+
+                # Notify browser that search is in progress
+                try:
+                    await websocket.send_json({"type": "searching", "query": query})
+                except Exception:
+                    pass
 
                 result = await execute_web_search(client, query)
 

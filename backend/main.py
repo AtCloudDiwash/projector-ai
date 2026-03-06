@@ -91,6 +91,29 @@ async def health_check():
     return {"status": "ok", "service": "cinematic-narrator"}
 
 
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+async def chrome_devtools_json():
+    """Satisfy Chrome DevTools' automatic probe to silence 404 log noise."""
+    return JSONResponse({})
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Silence browser favicon 404 noise."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
+@app.get("/logo.svg")
+async def serve_logo():
+    """Serve the Projector.AI brand logo from the frontend build output."""
+    logo_path = os.path.join(FRONTEND_DIR, "logo.svg")
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path, media_type="image/svg+xml")
+    from fastapi.responses import Response
+    return Response(status_code=404)
+
+
 @app.post("/upload")
 async def upload_and_start(
     file: UploadFile = File(...),

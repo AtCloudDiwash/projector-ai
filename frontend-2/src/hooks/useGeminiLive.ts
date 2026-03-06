@@ -25,6 +25,7 @@ export interface UseGeminiLiveReturn {
   isConnected:      boolean;
   isMicActive:      boolean;
   isScreenShared:   boolean;
+  isSearching:      boolean;
   mode:             GeminiWaveMode;
   searchResult:     SearchResult | null;
   toggleMic:        () => void;
@@ -39,6 +40,7 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
   const [isConnected,    setIsConnected]    = useState(false);
   const [isMicActive,    setIsMicActive]    = useState(false);
   const [isScreenShared, setIsScreenShared] = useState(false);
+  const [isSearching,    setIsSearching]    = useState(false);
   const [mode,           setMode]           = useState<GeminiWaveMode>('idle');
   const [searchResult,   setSearchResult]   = useState<SearchResult | null>(null);
 
@@ -65,10 +67,11 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
   const shareScreen = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 5, displaySurface: 'browser' as DisplayCaptureSurfaceType },
+        video: { frameRate: 5 },
         audio: false,
-        // Pre-select this tab in the picker so Gemini sees the app itself.
-        preferCurrentTab: true,
+        // Include the current tab in the picker alongside other tabs, windows,
+        // and entire screen options.
+        selfBrowserSurface: 'include',
       } as DisplayMediaStreamOptions);
       screenStreamRef.current = stream;
       setIsScreenShared(true);
@@ -220,7 +223,11 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
             if (msg.type === 'ready') {
               setIsConnected(true);
 
+            } else if (msg.type === 'searching') {
+              setIsSearching(true);
+
             } else if (msg.type === 'search_result') {
+              setIsSearching(false);
               setSearchResult({
                 query:   msg.query   ?? '',
                 summary: msg.summary ?? '',
@@ -318,6 +325,7 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
     isConnected,
     isMicActive,
     isScreenShared,
+    isSearching,
     mode,
     searchResult,
     toggleMic,
