@@ -32,3 +32,9 @@ export type SSEEventType =
   | 'error';
 
 export type GeminiWaveMode = 'idle' | 'listening' | 'speaking';
+
+export interface SearchResult {
+  query:   string;
+  summary: string;
+  sources: { title: string; url: string }[];
+}
