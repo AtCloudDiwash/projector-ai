@@ -10,6 +10,11 @@ export default defineConfig({
       '/stream':  'http://localhost:8080',
       '/session': 'http://localhost:8080',
       '/health':  'http://localhost:8080',
+      '/ws': {
+        target: 'ws://localhost:8080',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
   build: {

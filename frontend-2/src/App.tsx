@@ -7,8 +7,9 @@ import { PlayerScreen }    from './components/PlayerScreen';
 import { ErrorToast }      from './components/ErrorToast';
 
 export const App: React.FC = () => {
-  const [screen, setScreen] = useState<AppScreen>('upload');
-  const [error,  setError]  = useState<string | null>(null);
+  const [screen,    setScreen]    = useState<AppScreen>('upload');
+  const [error,     setError]     = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const queue = useSceneQueue();
 
@@ -18,10 +19,11 @@ export const App: React.FC = () => {
     setScreen(prev => prev === 'loading' ? 'upload' : prev);
   }, []);
 
-  const handleSessionStart = useCallback((sessionId: string) => {
+  const handleSessionStart = useCallback((id: string) => {
+    setSessionId(id);
     setScreen('loading');
     queue.startSession(
-      sessionId,
+      id,
       () => setScreen('player'),  // first scene ready
       handleError,
     );
@@ -29,6 +31,7 @@ export const App: React.FC = () => {
 
   const handleBack = useCallback(() => {
     queue.stopSession();
+    setSessionId(null);
     setScreen('upload');
   }, [queue]);
 
@@ -44,6 +47,7 @@ export const App: React.FC = () => {
 
       {screen === 'player' && (
         <PlayerScreen
+          sessionId={sessionId}
           queueSize={queue.queueSize}
           totalScenes={queue.totalScenes}
           popScene={queue.popScene}

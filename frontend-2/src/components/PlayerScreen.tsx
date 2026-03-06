@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import type { Scene } from '../types';
 import { useAudioPlayer }       from '../hooks/useAudioPlayer';
 import { useNarrationRenderer } from '../hooks/useNarrationRenderer';
+import { useGeminiLive }        from '../hooks/useGeminiLive';
 import { SceneImage }     from './SceneImage';
 import { TitleCard }      from './TitleCard';
 import { CaptionHeader }  from './CaptionHeader';
@@ -11,6 +12,7 @@ import { UnlockOverlay }  from './UnlockOverlay';
 import { Controls }       from './Controls';
 
 interface Props {
+  sessionId:   string | null;
   queueSize:   number;         // increments when new scene is queued
   totalScenes: number;
   popScene:    () => Scene | null;
@@ -18,7 +20,7 @@ interface Props {
 }
 
 export const PlayerScreen: React.FC<Props> = ({
-  queueSize, totalScenes, popScene, onBack,
+  sessionId, queueSize, totalScenes, popScene, onBack,
 }) => {
   // ── Refs that must never trigger re-renders ──────────────
   const isDisplayingRef = useRef(false);
@@ -27,6 +29,7 @@ export const PlayerScreen: React.FC<Props> = ({
   // ── Hooks ────────────────────────────────────────────────
   const audio    = useAudioPlayer();
   const narrator = useNarrationRenderer(subtitleRef);
+  const live     = useGeminiLive(sessionId);
 
   // ── State (minimal — each triggers ONE targeted re-render) ──
   const [showUnlock,     setShowUnlock]     = useState(true);
@@ -35,10 +38,22 @@ export const PlayerScreen: React.FC<Props> = ({
   const [captionVisible, setCaptionVisible] = useState(false);
   const [sceneLabel,     setSceneLabel]     = useState('');
 
+  // ── Pause scene when Gemini Live takes over, resume when done ────────────
+  useEffect(() => {
+    if (live.isActive) {
+      audio.pause();
+      narrator.stop();
+    } else {
+      audio.resume();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.isActive]);
+
   // ── Advance to next scene ─────────────────────────────────
   const tryPlayNext = useCallback(() => {
     if (!audio.audioUnlocked)   return;
     if (isDisplayingRef.current) return;
+    if (live.isActive)           return;  // live agent has the floor
 
     const scene = popScene();
     if (!scene) return;
@@ -108,17 +123,33 @@ export const PlayerScreen: React.FC<Props> = ({
     setTimeout(tryPlayNext, 50);
   }, [audio, tryPlayNext]);
 
+  // ── Space key → toggle Gemini Live ───────────────────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        live.toggle();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  // live.toggle ref changes only when isActive changes — stable enough
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.toggle]);
+
   // ── Back button ───────────────────────────────────────────
   const handleBack = useCallback(() => {
     audio.stop();
     narrator.stop();
+    live.disconnect();
     isDisplayingRef.current = false;
     setCurrentScene(null);
     setTitleVisible(false);
     setCaptionVisible(false);
     setShowUnlock(true);
     onBack();
-  }, [audio, narrator, onBack]);
+  }, [audio, narrator, live, onBack]);
 
   return (
     <div className="fixed inset-0 bg-black group">
@@ -159,8 +190,22 @@ export const PlayerScreen: React.FC<Props> = ({
         {/* Word-by-word subtitle — bottom */}
         <SubtitleRenderer ref={subtitleRef} />
 
-        {/* Gemini wave — placeholder, wired up when Gemini Live is integrated */}
-        <GeminiWave isActive={false} mode="idle" />
+        {/* Gemini Live wave — press Space or click button to toggle */}
+        <GeminiWave isActive={live.isActive} mode={live.mode} />
+
+        {/* Ask AI toggle button */}
+        <button
+          onClick={live.toggle}
+          className={`absolute z-40 bottom-[10vh] right-6
+            px-4 py-2 rounded-full text-xs tracking-widest uppercase font-sans
+            border transition-all duration-300 cursor-pointer
+            ${live.isActive
+              ? 'bg-sky-500/20 border-sky-400 text-sky-300 shadow-[0_0_12px_rgba(56,189,248,0.4)]'
+              : 'bg-black/40 border-white/20 text-white/50 hover:border-white/50 hover:text-white/80'
+            }`}
+        >
+          {live.isActive ? '◼ Stop AI' : '◆ Ask AI'}
+        </button>
 
         {/* Controls (visible on hover) */}
         <Controls onBack={handleBack} onReplayAudio={audio.replayCurrent} />

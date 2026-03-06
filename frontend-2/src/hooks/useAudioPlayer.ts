@@ -8,6 +8,8 @@ interface UseAudioPlayerReturn {
   unlock:        () => void;
   play:          (src: string, onEnded: () => void, onMetadata: (durationMs: number) => void) => void;
   stop:          () => void;
+  pause:         () => void;
+  resume:        () => void;
   replayCurrent: () => void;
 }
 
@@ -51,11 +53,19 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     });
   }, [stop]);
 
+  const pause = useCallback(() => {
+    audioRef.current?.pause();
+  }, []);
+
+  const resume = useCallback(() => {
+    audioRef.current?.play().catch(console.warn);
+  }, []);
+
   const replayCurrent = useCallback(() => {
     if (!audioRef.current) return;
     audioRef.current.currentTime = 0;
     audioRef.current.play().catch(console.warn);
   }, []);
 
-  return { audioUnlocked, unlock, play, stop, replayCurrent };
+  return { audioUnlocked, unlock, play, stop, pause, resume, replayCurrent };
 }
