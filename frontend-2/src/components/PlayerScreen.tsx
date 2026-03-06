@@ -24,6 +24,7 @@ export const PlayerScreen: React.FC<Props> = ({
 }) => {
   const isDisplayingRef = useRef(false);
   const subtitleRef     = useRef<HTMLDivElement>(null);
+  const hasSpokenRef    = useRef(false);  // true after user first presses Space
 
   const audio    = useAudioPlayer();
   const narrator = useNarrationRenderer(subtitleRef);
@@ -36,8 +37,11 @@ export const PlayerScreen: React.FC<Props> = ({
   const [sceneLabel,     setSceneLabel]     = useState('');
 
   // ── Push scene context to Gemini whenever scene changes ───────────────────
+  // Guard: don't send until user has spoken at least once (prevents Gemini
+  // from auto-responding to scene updates before user interacts).
   useEffect(() => {
     if (!currentScene) return;
+    if (!hasSpokenRef.current) return;
     const ctx = [
       `Scene ${currentScene.scene_num} of ${totalScenes}: "${currentScene.title}".`,
       currentScene.narration ?? '',
@@ -47,22 +51,23 @@ export const PlayerScreen: React.FC<Props> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentScene]);
 
-  // ── Pause scene when mic is active, resume when done ──────────────────────
+  // ── Pause scene when mic is active OR Gemini is speaking ─────────────────
   useEffect(() => {
-    if (live.isMicActive) {
+    if (live.isMicActive || live.mode === 'speaking') {
       audio.pause();
       narrator.stop();
     } else {
       audio.resume();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live.isMicActive]);
+  }, [live.isMicActive, live.mode]);
 
   // ── Advance to next scene ─────────────────────────────────────────────────
   const tryPlayNext = useCallback(() => {
     if (!audio.audioUnlocked)    return;
     if (isDisplayingRef.current) return;
     if (live.isMicActive)        return;
+    if (live.mode === 'speaking') return;
 
     const scene = popScene();
     if (!scene) return;
@@ -113,7 +118,9 @@ export const PlayerScreen: React.FC<Props> = ({
 
   // ── Mic toggle — prime context on unmute, then toggle ────────────────────
   const handleMicToggle = useCallback(() => {
-    // If about to unmute, send current scene as a fresh context burst first
+    // Mark first interaction — unblocks background context sends from now on
+    hasSpokenRef.current = true;
+    // Send fresh scene context right before unmuting so Gemini is up to date
     if (!live.isMicActive && currentScene) {
       const ctx = `Currently showing Scene ${currentScene.scene_num} of ${totalScenes}: "${currentScene.title}". ${currentScene.narration ?? ''} ${currentScene.caption ? 'Key insight: ' + currentScene.caption : ''}`.trim();
       live.sendContext(ctx);
@@ -166,7 +173,31 @@ export const PlayerScreen: React.FC<Props> = ({
 
         {/* Letterbox bars */}
         <div className="absolute top-0 left-0 right-0 h-[8vh] bg-black z-10" />
-        <div className="absolute bottom-0 left-0 right-0 h-[8vh] bg-black z-10" />
+        {/* Bottom letterbox — hosts mic + share controls */}
+        <div className="absolute bottom-0 left-0 right-0 h-[8vh] bg-black z-20 flex items-center justify-center gap-3">
+          <button
+            onClick={live.isScreenShared ? live.stopScreenShare : live.shareScreen}
+            className={`px-4 py-1.5 rounded-full text-[10px] tracking-widest uppercase font-sans
+              border transition-all duration-300 cursor-pointer
+              ${live.isScreenShared
+                ? 'bg-violet-500/20 border-violet-400 text-violet-300 shadow-[0_0_10px_rgba(167,139,250,0.35)]'
+                : 'bg-white/5 border-white/15 text-white/40 hover:border-white/40 hover:text-white/70'
+              }`}
+          >
+            {live.isScreenShared ? 'Stop Sharing' : 'Share Screen'}
+          </button>
+          <button
+            onClick={handleMicToggle}
+            className={`px-4 py-1.5 rounded-full text-[10px] tracking-widest uppercase font-sans
+              border transition-all duration-300 cursor-pointer
+              ${live.isMicActive
+                ? 'bg-sky-500/20 border-sky-400 text-sky-300 shadow-[0_0_10px_rgba(56,189,248,0.35)]'
+                : 'bg-white/5 border-white/15 text-white/40 hover:border-white/40 hover:text-white/70'
+              }`}
+          >
+            {live.isMicActive ? 'Mute' : 'Speak'}
+          </button>
+        </div>
 
         {/* ── Gemini Live monitoring status bar (inside top letterbox) ── */}
         <div className="absolute top-0 left-0 right-0 h-[8vh] z-20
@@ -183,20 +214,6 @@ export const PlayerScreen: React.FC<Props> = ({
                         uppercase text-gold/70 font-sans">
           {sceneLabel}
         </div>
-
-        {/* Mic toggle button */}
-        <button
-          onClick={handleMicToggle}
-          className={`absolute top-[10vh] right-6 z-20
-            px-3 py-1 rounded-full text-[10px] tracking-widest uppercase font-sans
-            border transition-all duration-300 cursor-pointer
-            ${live.isMicActive
-              ? 'bg-sky-500/20 border-sky-400 text-sky-300 shadow-[0_0_10px_rgba(56,189,248,0.35)]'
-              : 'bg-black/40 border-white/20 text-white/40 hover:border-white/40 hover:text-white/70'
-            }`}
-        >
-          {live.isMicActive ? '⏹ Mute' : '🎙 Speak'}
-        </button>
 
         {/* Short yellow caption — top */}
         <CaptionHeader text={currentScene?.caption ?? null} visible={captionVisible} />
