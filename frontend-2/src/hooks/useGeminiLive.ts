@@ -3,23 +3,14 @@
  *
  * Session opens automatically when sessionId is set.
  * Space key only mutes/unmutes mic — memory persists across turns.
- * Screen capture: user clicks "Share Screen" once → stream stored →
- *   Gemini calls capture_screen tool → one frame grabbed on demand.
- *
- * Tool protocol (extensible):
- *   Backend → {"type":"tool_call","tool":"capture_screen","call_id":"..."}
- *   Frontend → {"type":"frame","data":"base64jpeg","call_id":"..."}
- *   Future:   {"type":"search_result","results":[...],"call_id":"..."}
+ * Screen share: user clicks "Share Screen" once → persistent video element
+ *   streams one JPEG frame/sec to backend via {"type":"screen_frame","data":"..."}.
+ *   Gemini receives frames continuously via LiveClientRealtimeInput.
  */
 
 import { useRef, useState, useCallback, useEffect } from 'react';
 import type { GeminiWaveMode, SearchResult } from '../types';
 
-// ImageCapture API — not in standard TS lib yet
-declare class ImageCapture {
-  constructor(track: MediaStreamTrack);
-  grabFrame(): Promise<ImageBitmap>;
-}
 
 export interface UseGeminiLiveReturn {
   isConnected:      boolean;
@@ -49,6 +40,9 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
   const playCtxRef       = useRef<AudioContext | null>(null);
   const micStreamRef     = useRef<MediaStream | null>(null);
   const screenStreamRef  = useRef<MediaStream | null>(null);  // getDisplayMedia stream
+  const screenVideoRef   = useRef<HTMLVideoElement | null>(null);
+  const screenCanvasRef  = useRef<HTMLCanvasElement | null>(null);
+  const screenIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const processorRef     = useRef<ScriptProcessorNode | null>(null);
   const nextPlayTimeRef  = useRef<number>(0);
   const speakTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -57,6 +51,16 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
 
   // ── Screen share ───────────────────────────────────────────────────────────
   const stopScreenShare = useCallback(() => {
+    if (screenIntervalRef.current) {
+      clearInterval(screenIntervalRef.current);
+      screenIntervalRef.current = null;
+    }
+    if (screenVideoRef.current) {
+      screenVideoRef.current.srcObject = null;
+      screenVideoRef.current.remove();
+      screenVideoRef.current = null;
+    }
+    screenCanvasRef.current = null;
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach(t => t.stop());
       screenStreamRef.current = null;
@@ -69,55 +73,61 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: 5 },
         audio: false,
-        // Include the current tab in the picker alongside other tabs, windows,
-        // and entire screen options.
         selfBrowserSurface: 'include',
       } as DisplayMediaStreamOptions);
+
       screenStreamRef.current = stream;
-      setIsScreenShared(true);
-      // Auto-clean when user stops sharing via browser chrome
+
+      // Create one persistent video element, attached to DOM (hidden) so
+      // browsers reliably decode frames from tab-capture streams.
+      const video = document.createElement('video');
+      video.muted       = true;
+      video.playsInline = true;
+      video.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
+      document.body.appendChild(video);
+      screenVideoRef.current = video;
+
+      // Create one persistent canvas sized to the video track
+      const canvas = document.createElement('canvas');
+      screenCanvasRef.current = canvas;
+
+      video.srcObject = stream;
+
+      // Wait for canplay — guarantees a real frame is available before we start
+      video.addEventListener('canplay', () => {
+        canvas.width  = video.videoWidth  || 1280;
+        canvas.height = video.videoHeight || 720;
+        video.play().catch(() => {});
+
+        // Send one frame per second to Gemini
+        screenIntervalRef.current = setInterval(() => {
+          const ws = wsRef.current;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          if (video.readyState < 2) return; // no decoded frame yet
+
+          canvas.getContext('2d')!.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+          canvas.toBlob((blob) => {
+            if (!blob) return;
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64 = (reader.result as string).split(',')[1];
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'screen_frame', data: base64 }));
+              }
+            };
+            reader.readAsDataURL(blob);
+          }, 'image/jpeg', 0.7);
+        }, 1000);
+      }, { once: true });
+
+      // Auto-clean when user stops via browser chrome
       stream.getVideoTracks()[0].addEventListener('ended', stopScreenShare, { once: true });
+      setIsScreenShared(true);
     } catch (err) {
       console.warn('[GeminiLive] Screen share cancelled or denied:', err);
     }
   }, [stopScreenShare]);
-
-  // Grab a single JPEG frame from the screen stream (base64).
-  // Uses a hidden <video> element — more reliable than ImageCapture on tab streams.
-  const captureFrame = useCallback((): Promise<string | null> => {
-    const stream = screenStreamRef.current;
-    if (!stream) return Promise.resolve(null);
-    const track = stream.getVideoTracks()[0];
-    if (!track || track.readyState !== 'live') return Promise.resolve(null);
-
-    return new Promise<string | null>((resolve) => {
-      const video = document.createElement('video');
-      video.muted       = true;
-      video.playsInline = true;
-      video.srcObject   = stream;
-
-      const timeout = setTimeout(() => {
-        video.srcObject = null;
-        resolve(null);
-      }, 4000);
-
-      video.onloadedmetadata = () => {
-        video.play().then(() => {
-          requestAnimationFrame(() => {
-            const canvas = document.createElement('canvas');
-            canvas.width  = video.videoWidth  || 1280;
-            canvas.height = video.videoHeight || 720;
-            canvas.getContext('2d')!.drawImage(video, 0, 0);
-            video.pause();
-            video.srcObject = null;
-            clearTimeout(timeout);
-            resolve(canvas.toDataURL('image/jpeg', 0.7).split(',')[1]);
-          });
-        }).catch(() => { clearTimeout(timeout); resolve(null); });
-      };
-      video.onerror = () => { clearTimeout(timeout); resolve(null); };
-    });
-  }, []);
 
   // ── Teardown ───────────────────────────────────────────────────────────────
   const disconnect = useCallback(() => {
@@ -211,8 +221,6 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
           try {
             const msg = JSON.parse(ev.data) as {
               type:     string;
-              tool?:    string;
-              call_id?: string;
               message?: string;
               // search_result fields
               query?:   string;
@@ -240,18 +248,6 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
               speakTimerRef.current = setTimeout(() => {
                 setMode(micMutedRef.current ? 'idle' : 'listening');
               }, 400);
-
-            } else if (msg.type === 'tool_call') {
-              // ── Tool dispatch (extend here for new tools) ────────────────
-              if (msg.tool === 'capture_screen') {
-                const data = await captureFrame();
-                ws.send(JSON.stringify({
-                  type:    'frame',
-                  call_id: msg.call_id ?? '',
-                  data:    data ?? '',         // empty string = no stream active
-                }));
-              }
-              // Future: else if (msg.tool === 'google_search') { ... }
 
             } else if (msg.type === 'error') {
               console.error('[GeminiLive] error:', msg.message);
@@ -293,7 +289,7 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
       console.error('[GeminiLive] Failed to connect:', err);
       disconnect();
     }
-  }, [sessionId, disconnect, captureFrame]);
+  }, [sessionId, disconnect]);
 
   // ── Auto-connect when player screen mounts ────────────────────────────────
   useEffect(() => {

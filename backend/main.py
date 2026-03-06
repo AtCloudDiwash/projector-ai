@@ -252,7 +252,7 @@ async def gemini_live_ws(websocket: WebSocket, session_id: str):
     from firestore_client import get_session
     from live_agent import run_live_relay
     session = get_session(session_id)
-    await run_live_relay(websocket, session)
+    await run_live_relay(websocket, session) # This will start the Gemini Live agent
 
 
 if __name__ == "__main__":
