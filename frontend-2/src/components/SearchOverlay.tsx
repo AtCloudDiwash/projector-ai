@@ -7,9 +7,11 @@ interface Props {
 }
 
 export const SearchOverlay: React.FC<Props> = ({ result, onClose }) => (
-  <div className="absolute top-[9vh] bottom-[9vh] inset-x-6 z-50 flex items-center justify-center pointer-events-none">
+  <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
+    {/* Dark backdrop — dims bright images behind the card */}
+    <div className="absolute inset-0 bg-black/60 pointer-events-auto" onClick={onClose} />
     <div
-      className="pointer-events-auto w-full max-w-2xl max-h-full flex flex-col
+      className="relative pointer-events-auto w-full max-w-2xl max-h-full flex flex-col
                  bg-zinc-950/88 backdrop-blur-md border border-white/10 rounded-2xl overflow-hidden"
       style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.7)' }}
     >
