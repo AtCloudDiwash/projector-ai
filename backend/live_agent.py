@@ -3,13 +3,14 @@ Gemini Live Agent relay — always-on, context-aware, tool-enabled.
 
 Streams:
   Browser → Server  binary: PCM Int16 16kHz mic audio (when mic unmuted)
-  Browser → Server  JSON:   context updates, tool responses (frame / future: search result)
+  Browser → Server  JSON:   context updates, tool responses (frame)
   Server  → Browser binary: PCM Int16 24kHz Gemini voice
-  Server  → Browser JSON:   ready | turn_complete | tool_call | error
+  Server  → Browser JSON:   ready | turn_complete | tool_call | search_result | error
 
-Tool protocol (extensible — add new tools to TOOLS list + dispatch in handle_tool_responses):
-  Currently:   capture_screen  — Gemini requests a screenshot, frontend sends JPEG frame back
-  Future slot: google_search   — Gemini requests a web search, backend fetches and returns results
+Tools:
+  capture_screen — Gemini calls it → frontend grabs JPEG → backend sends image to Gemini
+  web_search     — Gemini calls it → backend executes Gemini grounded search → returns summary+sources
+                   to both Gemini (LiveClientToolResponse) and browser (search_result JSON)
 """
 
 import os
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LIVE_MODEL     = "gemini-2.5-flash-native-audio-latest"
 
-# ── Tool definitions (extend this list to add new tools) ─────────────────────
+# ── Tool definitions ──────────────────────────────────────────────────────────
 TOOLS = [
     {
         "function_declarations": [
@@ -43,21 +44,72 @@ TOOLS = [
                     "required": [],
                 },
             },
-            # ── Future tool slot ──────────────────────────────────────────────
-            # {
-            #     "name": "google_search",
-            #     "description": "Search the web for up-to-date information on a topic.",
-            #     "parameters": {
-            #         "type": "object",
-            #         "properties": {
-            #             "query": {"type": "string", "description": "The search query."}
-            #         },
-            #         "required": ["query"],
-            #     },
-            # },
+            {
+                "name": "web_search",
+                "description": (
+                    "Search the web for current, factual information on any topic. "
+                    "Call this when the user asks about recent events, real-world facts, statistics, "
+                    "people, places, or anything that benefits from up-to-date web sources."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "A concise search query.",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
         ]
     }
 ]
+
+
+async def execute_web_search(client: genai.Client, query: str) -> dict:
+    """
+    Run a Gemini generate_content call with Google Search grounding.
+    Returns {"summary": str, "sources": [{"title": str, "url": str}]}.
+    """
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=(
+                f"Search the web and give a concise, factual summary about: {query}. "
+                "Include specific facts, figures, and current information where available."
+            ),
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.1,
+            ),
+        )
+
+        summary = response.text or "No results found."
+        sources: list[dict] = []
+
+        if response.candidates:
+            gm = response.candidates[0].grounding_metadata
+            if gm and gm.grounding_chunks:
+                seen: set[str] = set()
+                for chunk in gm.grounding_chunks:
+                    web = getattr(chunk, "web", None)
+                    if web and getattr(web, "uri", None):
+                        url = web.uri
+                        if url not in seen:
+                            seen.add(url)
+                            sources.append({
+                                "title": getattr(web, "title", None) or url,
+                                "url":   url,
+                            })
+                        if len(sources) >= 5:
+                            break
+
+        return {"summary": summary, "sources": sources}
+
+    except Exception as exc:
+        logger.error(f"execute_web_search error: {exc}")
+        return {"summary": f"Search failed: {exc}", "sources": []}
 
 
 def _build_context(session: dict | None) -> str:
@@ -99,6 +151,8 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             "- Speak naturally, like a documentary narrator answering a viewer's question.\n"
             "- When the user asks about what's on screen or what image they see, call capture_screen.\n"
             "- After receiving the screen capture, describe what you see naturally and concisely.\n"
+            "- When the user asks about real-world facts, current events, people, places, or anything requiring web knowledge, call web_search.\n"
+            "- After a web_search result is returned, summarize the key facts concisely in your voice response.\n"
             "- If asked something unrelated, gently redirect to the content."
         ),
         "speech_config": {
@@ -118,10 +172,11 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
     # Mixed input queue: bytes = mic audio | str = context text | None = sentinel
     input_queue: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=100)
 
-    # Tool response queue: one dict per tool call response from the browser
-    # Dict shape: {"tool": str, "call_id": str, "data": any}
-    # Extend: add more shapes for future tools (e.g. search results)
+    # Tool response queue: browser → backend tool responses (e.g. screen frame)
     tool_response_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    # Backend tool queue: Gemini tool calls handled entirely on the backend (e.g. web_search)
+    backend_tool_queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
     # ── Receive from browser ──────────────────────────────────────────────────
     async def recv_from_browser() -> None:
@@ -170,6 +225,7 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
         finally:
             await input_queue.put(None)
             await tool_response_queue.put(None)
+            await backend_tool_queue.put(None)
             stop_event.set()
 
     # ── Forward mic audio + context text to Gemini ───────────────────────────
@@ -253,6 +309,47 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
             #         )]
             #     ))
 
+    # ── Handle backend-side tool calls (web_search executed here, not browser) ─
+    async def handle_backend_tools(live) -> None:
+        while not stop_event.is_set():
+            item = await backend_tool_queue.get()
+            if item is None:
+                break
+
+            if item.get("name") == "web_search":
+                call_id = item["call_id"]
+                query   = item["args"].get("query", "")
+                logger.info(f"Executing web_search: {query!r}")
+
+                result = await execute_web_search(client, query)
+
+                # Send search result to browser for the UI overlay
+                try:
+                    await websocket.send_json({
+                        "type":    "search_result",
+                        "query":   query,
+                        "summary": result["summary"],
+                        "sources": result["sources"],
+                    })
+                except Exception as exc:
+                    logger.warning(f"Failed to send search_result to browser: {exc}")
+
+                # Return result to Gemini so it can speak its summary
+                await live.send(
+                    input=types.LiveClientToolResponse(
+                        function_responses=[
+                            types.FunctionResponse(
+                                id=call_id,
+                                name="web_search",
+                                response={
+                                    "summary": result["summary"],
+                                    "sources": [s["url"] for s in result["sources"]],
+                                },
+                            )
+                        ]
+                    )
+                )
+
     # ── Receive from Gemini (multi-turn + tool call handling) ─────────────────
     async def forward_from_gemini(live) -> None:
         try:
@@ -276,10 +373,11 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                     if response.server_content and response.server_content.turn_complete:
                         await websocket.send_json({"type": "turn_complete"})
 
-                    # Tool calls from Gemini → forward request to browser
+                    # Tool calls from Gemini → dispatch by tool name
                     if response.tool_call:
                         for fn_call in response.tool_call.function_calls:
                             if fn_call.name == "capture_screen":
+                                # Browser-side tool: ask frontend to grab a frame
                                 await websocket.send_json({
                                     "type":    "tool_call",
                                     "tool":    "capture_screen",
@@ -287,14 +385,14 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                                 })
                                 logger.info("Gemini requested screen capture")
 
-                            # ── Future tool dispatch slot ─────────────────────
-                            # elif fn_call.name == "google_search":
-                            #     await websocket.send_json({
-                            #         "type":    "tool_call",
-                            #         "tool":    "google_search",
-                            #         "call_id": fn_call.id,
-                            #         "args":    fn_call.args,
-                            #     })
+                            elif fn_call.name == "web_search":
+                                # Backend-side tool: handle entirely on server
+                                await backend_tool_queue.put({
+                                    "name":    "web_search",
+                                    "call_id": fn_call.id,
+                                    "args":    dict(fn_call.args) if fn_call.args else {},
+                                })
+                                logger.info(f"Gemini requested web_search: {fn_call.args}")
 
         except Exception as exc:
             logger.error(f"Gemini receive error: {exc}")
@@ -310,6 +408,7 @@ async def run_live_relay(websocket: WebSocket, session: dict | None) -> None:
                 recv_from_browser(),
                 forward_inputs(live),
                 handle_tool_responses(live),
+                handle_backend_tools(live),
                 forward_from_gemini(live),
                 return_exceptions=True,
             )

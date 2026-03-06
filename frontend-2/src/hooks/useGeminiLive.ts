@@ -13,7 +13,7 @@
  */
 
 import { useRef, useState, useCallback, useEffect } from 'react';
-import type { GeminiWaveMode } from '../types';
+import type { GeminiWaveMode, SearchResult } from '../types';
 
 // ImageCapture API — not in standard TS lib yet
 declare class ImageCapture {
@@ -22,15 +22,17 @@ declare class ImageCapture {
 }
 
 export interface UseGeminiLiveReturn {
-  isConnected:    boolean;
-  isMicActive:    boolean;
-  isScreenShared: boolean;
-  mode:           GeminiWaveMode;
-  toggleMic:      () => void;
-  sendContext:    (text: string) => void;
-  shareScreen:    () => Promise<void>;
-  stopScreenShare: () => void;
-  disconnect:     () => void;
+  isConnected:      boolean;
+  isMicActive:      boolean;
+  isScreenShared:   boolean;
+  mode:             GeminiWaveMode;
+  searchResult:     SearchResult | null;
+  toggleMic:        () => void;
+  sendContext:      (text: string) => void;
+  shareScreen:      () => Promise<void>;
+  stopScreenShare:  () => void;
+  clearSearchResult: () => void;
+  disconnect:       () => void;
 }
 
 export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
@@ -38,6 +40,7 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
   const [isMicActive,    setIsMicActive]    = useState(false);
   const [isScreenShared, setIsScreenShared] = useState(false);
   const [mode,           setMode]           = useState<GeminiWaveMode>('idle');
+  const [searchResult,   setSearchResult]   = useState<SearchResult | null>(null);
 
   const wsRef            = useRef<WebSocket | null>(null);
   const micCtxRef        = useRef<AudioContext | null>(null);
@@ -204,14 +207,25 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
         if (typeof ev.data === 'string') {
           try {
             const msg = JSON.parse(ev.data) as {
-              type: string;
-              tool?: string;
+              type:     string;
+              tool?:    string;
               call_id?: string;
               message?: string;
+              // search_result fields
+              query?:   string;
+              summary?: string;
+              sources?: { title: string; url: string }[];
             };
 
             if (msg.type === 'ready') {
               setIsConnected(true);
+
+            } else if (msg.type === 'search_result') {
+              setSearchResult({
+                query:   msg.query   ?? '',
+                summary: msg.summary ?? '',
+                sources: msg.sources ?? [],
+              });
 
             } else if (msg.type === 'turn_complete') {
               nextPlayTimeRef.current = 0;
@@ -289,6 +303,9 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
     setMode(nowMuted ? 'idle' : 'listening');
   }, []);
 
+  // ── Clear search result overlay ───────────────────────────────────────────
+  const clearSearchResult = useCallback(() => setSearchResult(null), []);
+
   // ── Send scene context to Gemini silently ─────────────────────────────────
   const sendContext = useCallback((text: string) => {
     const ws = wsRef.current;
@@ -302,10 +319,12 @@ export function useGeminiLive(sessionId: string | null): UseGeminiLiveReturn {
     isMicActive,
     isScreenShared,
     mode,
+    searchResult,
     toggleMic,
     sendContext,
     shareScreen,
     stopScreenShare,
+    clearSearchResult,
     disconnect,
   };
 }

@@ -10,6 +10,7 @@ import { SubtitleRenderer } from './SubtitleRenderer';
 import { GeminiWave }     from './GeminiWave';
 import { UnlockOverlay }  from './UnlockOverlay';
 import { Controls }       from './Controls';
+import { SearchOverlay }  from './SearchOverlay';
 
 interface Props {
   sessionId:   string | null;
@@ -237,6 +238,10 @@ export const PlayerScreen: React.FC<Props> = ({
         <GeminiWave isActive={live.isMicActive || live.mode === 'speaking'} mode={live.mode} />
 
         <Controls onBack={handleBack} onReplayAudio={audio.replayCurrent} />
+
+        {live.searchResult && (
+          <SearchOverlay result={live.searchResult} onClose={live.clearSearchResult} />
+        )}
 
         {showUnlock && <UnlockOverlay onUnlock={handleUnlock} />}
       </div>
