@@ -25,7 +25,11 @@ from firestore_client import create_session, append_scene, complete_session
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-IMAGE_MODEL = "gemini-2.0-flash-exp-image-generation"
+IMAGE_MODELS = [
+    "gemini-2.0-flash-exp-image-generation",  # primary
+    "gemini-2.5-flash-image",                  # fallback 1
+    "gemini-3.1-flash-image-preview",          # fallback 2
+]
 TEXT_MODEL = "gemini-2.5-flash"
 NUM_SCENES = 5
 
@@ -82,6 +86,24 @@ def _build_gemini_contents_for_breakdown(
         ]
 
 
+def _clean_json(raw: str) -> str:
+    """Strip markdown fences and extract the JSON array from Gemini output."""
+    raw = raw.strip()
+    # Remove markdown code fences
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0]
+    raw = raw.strip()
+    # Find the outermost JSON array
+    start = raw.find("[")
+    end   = raw.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        raw = raw[start:end + 1]
+    return raw
+
+
 async def _get_scene_breakdown(
     client: genai.Client,
     file_bytes: bytes,
@@ -102,20 +124,13 @@ async def _get_scene_breakdown(
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT"],
                 temperature=0.7,
-                max_output_tokens=4096,
+                max_output_tokens=16384,  # large enough for 5-scene JSON
             ),
         ),
     )
 
-    raw = response.text.strip()
-    # Strip markdown code fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.rsplit("```", 1)[0]
-
-    scenes = json.loads(raw.strip())
+    raw = _clean_json(response.text or "")
+    scenes = json.loads(raw)
     logger.info(f"Got {len(scenes)} scenes from Gemini.")
     return scenes
 
@@ -135,37 +150,42 @@ async def _generate_scene_image(
     )
 
     loop = asyncio.get_event_loop()
-    try:
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model=IMAGE_MODEL,
-                contents=image_prompt,
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"],
-                    temperature=1.0,
+    last_error = None
+
+    for model in IMAGE_MODELS:
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda m=model: client.models.generate_content(
+                    model=m,
+                    contents=image_prompt,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE", "TEXT"],
+                        temperature=1.0,
+                    ),
                 ),
-            ),
-        )
+            )
 
-        for part in response.candidates[0].content.parts:
-            if part.inline_data is not None:
-                img_data = part.inline_data.data
-                mime_type = part.inline_data.mime_type or "image/png"
-                # Encode to base64 string if raw bytes
-                if isinstance(img_data, bytes):
-                    img_b64 = base64.b64encode(img_data).decode("utf-8")
-                else:
-                    img_b64 = img_data  # already base64 string
-                logger.info(f"Generated image for scene '{scene.get('title')}'")
-                return img_b64, mime_type
+            for part in response.candidates[0].content.parts:
+                if part.inline_data is not None:
+                    img_data = part.inline_data.data
+                    mime_type = part.inline_data.mime_type or "image/png"
+                    if isinstance(img_data, bytes):
+                        img_b64 = base64.b64encode(img_data).decode("utf-8")
+                    else:
+                        img_b64 = img_data
+                    logger.info(f"Generated image via {model} for scene '{scene.get('title')}'")
+                    return img_b64, mime_type
 
-        logger.warning(f"No image part in response for scene '{scene.get('title')}'")
-        return None, None
+            logger.warning(f"No image part from {model} for scene '{scene.get('title')}'")
+            last_error = "no image part in response"
 
-    except Exception as e:
-        logger.error(f"Image generation failed for scene '{scene.get('title')}': {e}")
-        return None, None
+        except Exception as e:
+            logger.warning(f"Image model {model} failed: {e} — trying next")
+            last_error = e
+
+    logger.error(f"All image models failed for scene '{scene.get('title')}': {last_error}")
+    return None, None
 
 
 def _sse(event_type: str, data: dict) -> str:

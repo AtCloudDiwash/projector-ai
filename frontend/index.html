@@ -74,6 +74,14 @@
        PLAYER SCREEN
   ════════════════════════════════════════════ -->
   <div id="player-screen" class="screen">
+    <!-- Audio unlock overlay — shown before first scene plays -->
+    <div id="unlock-overlay" class="unlock-overlay hidden">
+      <div class="unlock-content">
+        <div class="unlock-icon">&#9654;</div>
+        <div class="unlock-label">Click to Begin</div>
+      </div>
+    </div>
+
     <!-- Full-screen cinematic canvas -->
     <div id="cinematic-stage">
       <!-- Background images crossfade -->
@@ -92,12 +100,12 @@
       <!-- HUD: scene counter -->
       <div id="scene-counter" class="hud scene-counter"></div>
 
-      <!-- On-screen caption -->
-      <div id="caption-overlay" class="caption-overlay"></div>
+      <!-- TOP HEADER: short yellow caption label -->
+      <div id="caption-header" class="caption-header"></div>
 
-      <!-- Narration text panel -->
-      <div id="narration-panel" class="narration-panel">
-        <div id="narration-text" class="narration-text"></div>
+      <!-- BOTTOM: rolling word-by-word subtitle -->
+      <div id="subtitle-panel" class="subtitle-panel">
+        <div id="subtitle-container" class="subtitle-container"></div>
       </div>
 
       <!-- Scene title card -->
