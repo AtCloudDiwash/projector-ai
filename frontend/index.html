@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Cinematic Narrator</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════
+       UPLOAD SCREEN
+  ════════════════════════════════════════════ -->
+  <div id="upload-screen" class="screen active">
+    <div class="upload-container">
+      <div class="logo">
+        <div class="logo-icon">&#9654;</div>
+        <h1>The Cinematic Narrator</h1>
+        <p class="tagline">Transform any document into a live cinematic experience</p>
+      </div>
+
+      <form id="upload-form">
+        <div id="drop-zone" class="drop-zone">
+          <div class="drop-icon">&#128196;</div>
+          <div class="drop-text">Drop your file here</div>
+          <div class="drop-sub">or click to browse</div>
+          <div class="drop-types">PDF · TXT · MD · CSV · JSON · PNG · JPG · and more</div>
+          <input type="file" id="file-input" accept=".txt,.md,.pdf,.csv,.json,.yaml,.yml,.png,.jpg,.jpeg,.webp,.xml,.html" hidden />
+        </div>
+
+        <div id="file-preview" class="file-preview hidden">
+          <span class="file-icon">&#128196;</span>
+          <span id="file-name">filename.txt</span>
+          <button type="button" id="remove-file" class="remove-btn">&times;</button>
+        </div>
+
+        <div class="prompt-section">
+          <label for="prompt-input">What story should I tell?</label>
+          <textarea
+            id="prompt-input"
+            placeholder="e.g. 'Create a dramatic cinematic journey through this report' or 'Tell this story like a Netflix documentary'"
+            rows="3"
+          ></textarea>
+        </div>
+
+        <button type="submit" id="start-btn" class="start-btn" disabled>
+          <span class="btn-icon">&#9654;</span>
+          Begin Cinematic Experience
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       LOADING SCREEN
+  ════════════════════════════════════════════ -->
+  <div id="loading-screen" class="screen">
+    <div class="loading-container">
+      <div class="film-reel">
+        <div class="reel-circle"></div>
+        <div class="reel-spoke"></div>
+        <div class="reel-spoke rot60"></div>
+        <div class="reel-spoke rot120"></div>
+      </div>
+      <h2 id="loading-message">Analyzing your content...</h2>
+      <div class="progress-bar-container">
+        <div id="progress-bar" class="progress-bar"></div>
+      </div>
+      <p id="progress-label">0%</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       PLAYER SCREEN
+  ════════════════════════════════════════════ -->
+  <div id="player-screen" class="screen">
+    <!-- Full-screen cinematic canvas -->
+    <div id="cinematic-stage">
+      <!-- Background images crossfade -->
+      <div id="image-layer">
+        <div id="image-a" class="stage-image active"></div>
+        <div id="image-b" class="stage-image"></div>
+      </div>
+
+      <!-- Film grain overlay -->
+      <div class="film-grain"></div>
+
+      <!-- Letterbox bars -->
+      <div class="letterbox-top"></div>
+      <div class="letterbox-bottom"></div>
+
+      <!-- HUD: scene counter -->
+      <div id="scene-counter" class="hud scene-counter"></div>
+
+      <!-- On-screen caption -->
+      <div id="caption-overlay" class="caption-overlay"></div>
+
+      <!-- Narration text panel -->
+      <div id="narration-panel" class="narration-panel">
+        <div id="narration-text" class="narration-text"></div>
+      </div>
+
+      <!-- Scene title card -->
+      <div id="title-card" class="title-card">
+        <div id="title-card-text" class="title-card-text"></div>
+      </div>
+
+      <!-- No image placeholder -->
+      <div id="no-image-placeholder" class="no-image-placeholder hidden">
+        <div class="placeholder-icon">&#127909;</div>
+        <div>Generating visual...</div>
+      </div>
+
+      <!-- Controls overlay -->
+      <div id="controls" class="controls">
+        <button id="back-btn" class="ctrl-btn" title="Start over">&#8592; New Experience</button>
+        <button id="replay-audio-btn" class="ctrl-btn" title="Replay narration">&#128266; Replay Audio</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       ERROR TOAST
+  ════════════════════════════════════════════ -->
+  <div id="error-toast" class="error-toast hidden">
+    <span id="error-message"></span>
+    <button id="error-close" class="error-close">&times;</button>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
