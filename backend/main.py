@@ -60,9 +60,16 @@ app.add_middleware(
 )
 
 # Serve frontend static files
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+# Set FRONTEND_VERSION=v2 in .env to use the React/TS frontend (frontend-2/dist)
+_frontend_version = os.getenv("FRONTEND_VERSION", "v1")
+if _frontend_version == "v2":
+    FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "static_v2")
+else:
+    FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets") if os.path.isdir(os.path.join(FRONTEND_DIR, "assets")) else None
 
 
 # ─────────────────────────────────────────────────────────────
