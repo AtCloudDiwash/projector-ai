@@ -9,7 +9,7 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,9 +60,16 @@ app.add_middleware(
 )
 
 # Serve frontend static files
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+# Set FRONTEND_VERSION=v2 in .env to use the React/TS frontend (frontend-2/dist)
+_frontend_version = os.getenv("FRONTEND_VERSION", "v1")
+if _frontend_version == "v2":
+    FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "static_v2")
+else:
+    FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets") if os.path.isdir(os.path.join(FRONTEND_DIR, "assets")) else None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -82,6 +89,29 @@ async def serve_frontend():
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "cinematic-narrator"}
+
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+async def chrome_devtools_json():
+    """Satisfy Chrome DevTools' automatic probe to silence 404 log noise."""
+    return JSONResponse({})
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Silence browser favicon 404 noise."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
+@app.get("/logo.svg")
+async def serve_logo():
+    """Serve the Projector.AI brand logo from the frontend build output."""
+    logo_path = os.path.join(FRONTEND_DIR, "logo.svg")
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path, media_type="image/svg+xml")
+    from fastapi.responses import Response
+    return Response(status_code=404)
 
 
 @app.post("/upload")
@@ -210,6 +240,19 @@ async def get_session_info(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
     return JSONResponse(session)
+
+
+@app.websocket("/ws/live/{session_id}")
+async def gemini_live_ws(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for Gemini Live voice agent.
+    Bridges browser mic (PCM 16kHz) ↔ Gemini Live API (PCM 24kHz).
+    """
+    await websocket.accept()
+    from firestore_client import get_session
+    from live_agent import run_live_relay
+    session = get_session(session_id)
+    await run_live_relay(websocket, session) # This will start the Gemini Live agent
 
 
 if __name__ == "__main__":
